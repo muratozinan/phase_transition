@@ -1,0 +1,444 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Ising Model Simulation</title>
+    <!-- Tailwind CSS for styling -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    <!-- React and ReactDOM -->
+    <script crossorigin src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+    <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+    <!-- Babel to handle JSX in the browser -->
+    <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+    <style>
+        /* Ensure crisp pixel rendering for the lattice */
+        canvas {
+            image-rendering: -moz-crisp-edges;
+            image-rendering: -webkit-crisp-edges;
+            image-rendering: pixelated;
+            image-rendering: crisp-edges;
+        }
+    </style>
+</head>
+<body class="bg-gray-100">
+    <div id="root"></div>
+
+    <script type="text/babel">
+        const { useState, useEffect, useRef, useCallback } = React;
+
+        // --- Constants & Physics ---
+        const L = 100; // Lattice size (100x100)
+        const N = L * L;
+        const J = 1; // Interaction strength (Ferromagnetic)
+        const KB = 1; // Boltzmann constant
+
+        // Neighbors lookup table for periodic boundary conditions
+        const getNeighbors = (index) => {
+            const x = index % L;
+            const y = Math.floor(index / L);
+            
+            const left = (x === 0 ? L - 1 : x - 1) + y * L;
+            const right = (x === L - 1 ? 0 : x + 1) + y * L;
+            const top = x + ((y === 0 ? L - 1 : y - 1) * L);
+            const bottom = x + ((y === L - 1 ? 0 : y + 1) * L);
+            
+            return [top, right, bottom, left];
+        };
+
+        const neighborTable = new Int32Array(N * 4);
+        for (let i = 0; i < N; i++) {
+            const [t, r, b, l] = getNeighbors(i);
+            neighborTable[i * 4 + 0] = t;
+            neighborTable[i * 4 + 1] = r;
+            neighborTable[i * 4 + 2] = b;
+            neighborTable[i * 4 + 3] = l;
+        }
+
+        function App() {
+            // --- State ---
+            const [temp, setTemp] = useState(1.5);
+            const [field, setField] = useState(-2.0); // External field H
+            const [magnetization, setMagnetization] = useState(-1);
+            const [isRunning, setIsRunning] = useState(false);
+            
+            // Sweep State
+            const [isSweeping, setIsSweeping] = useState(false);
+            const [sweepMode, setSweepMode] = useState(null); // 'field' or 'temp'
+            const [sweepDirection, setSweepDirection] = useState(1); 
+            
+            // --- Refs for High-Performance Simulation ---
+            const canvasRef = useRef(null);
+            const spinsRef = useRef(new Int8Array(N).fill(-1)); // Start all down
+            const requestRef = useRef(null);
+            const plotDataRef = useRef([]); // Store history of (H, M) for plotting
+            
+            // --- Initialization ---
+            useEffect(() => {
+                drawCanvas();
+            }, []);
+
+            // --- Simulation Loop ---
+            const step = useCallback(() => {
+                const spins = spinsRef.current;
+                let currentTemp = temp;
+                let currentField = field;
+                
+                // --- Sweeping Logic ---
+                if (isSweeping) {
+                    // MODE 1: Field Sweep (Used for both Low T and High T demos now)
+                    if (sweepMode === 'field') {
+                        // UPDATED: Slower sweep rate as requested
+                        const sweepRate = 0.008; 
+                        const limit = 2.0;
+                        currentField += sweepRate * sweepDirection;
+                        
+                        // UPDATED: Bounce back and forth instead of stopping
+                        if (sweepDirection === 1 && currentField >= limit) {
+                            currentField = limit;
+                            setSweepDirection(-1); // Switch to passing down
+                        } else if (sweepDirection === -1 && currentField <= -limit) {
+                            currentField = -limit;
+                            setSweepDirection(1); // Switch to passing up
+                        }
+                        
+                        setField(currentField);
+                    } 
+                    // MODE 2: Temperature Sweep (Kept logic, but unused by buttons now)
+                    else if (sweepMode === 'temp') {
+                        const sweepRate = 0.01;
+                        const limit = 5.0;
+                        currentTemp += sweepRate;
+
+                        if (currentTemp >= limit) {
+                            currentTemp = limit;
+                            setIsSweeping(false);
+                            setIsRunning(false);
+                        }
+                        setTemp(currentTemp);
+                    }
+                }
+
+                // --- Monte Carlo Steps (Metropolis) ---
+                const stepsPerFrame = N / 2; // Speed of simulation
+                let totalM = 0;
+
+                for (let k = 0; k < stepsPerFrame; k++) {
+                    const i = Math.floor(Math.random() * N);
+                    const s = spins[i];
+                    
+                    const offset = i * 4;
+                    const neighborSum = 
+                        spins[neighborTable[offset]] +
+                        spins[neighborTable[offset + 1]] +
+                        spins[neighborTable[offset + 2]] +
+                        spins[neighborTable[offset + 3]];
+
+                    const dE = 2 * s * (J * neighborSum + currentField);
+
+                    if (dE < 0 || Math.random() < Math.exp(-dE / (KB * currentTemp))) {
+                        spins[i] = -s;
+                    }
+                }
+
+                // --- Analysis ---
+                for (let i = 0; i < N; i++) totalM += spins[i];
+                const normalizedM = totalM / N;
+                setMagnetization(normalizedM);
+
+                // Record Data for Plot
+                if (isRunning || isSweeping) {
+                    // Thin out data recording slightly less since we are slower
+                    if (Math.random() < 0.2) { 
+                        plotDataRef.current.push({ h: currentField, m: normalizedM, t: currentTemp });
+                        // Cap history to prevent infinite memory growth during loops
+                        if (plotDataRef.current.length > 5000) {
+                            plotDataRef.current.shift();
+                        }
+                    }
+                }
+
+                drawCanvas();
+
+                if (isRunning || isSweeping) {
+                    requestRef.current = requestAnimationFrame(step);
+                }
+            }, [temp, field, isRunning, isSweeping, sweepDirection, sweepMode]);
+
+            // --- Effect to handle Start/Stop ---
+            useEffect(() => {
+                if (isRunning || isSweeping) {
+                    requestRef.current = requestAnimationFrame(step);
+                } else {
+                    cancelAnimationFrame(requestRef.current);
+                }
+                return () => cancelAnimationFrame(requestRef.current);
+            }, [isRunning, isSweeping, step]);
+
+            // --- Drawing Helper ---
+            const drawCanvas = () => {
+                const canvas = canvasRef.current;
+                if (!canvas) return;
+                const ctx = canvas.getContext('2d');
+                const imageData = ctx.createImageData(L, L);
+                const data = imageData.data;
+                const spins = spinsRef.current;
+
+                for (let i = 0; i < N; i++) {
+                    const val = spins[i];
+                    const px = i * 4;
+                    if (val === 1) {
+                        data[px] = 239; data[px + 1] = 68; data[px + 2] = 68; data[px + 3] = 255;
+                    } else {
+                        data[px] = 59; data[px + 1] = 130; data[px + 2] = 246; data[px + 3] = 255;
+                    }
+                }
+                ctx.putImageData(imageData, 0, 0);
+            };
+
+            // --- Demo Functions ---
+            
+            // 1. First Order: Sweep H at LOW T
+            const startFirstOrderDemo = () => {
+                spinsRef.current.fill(-1); // Start ordered (all down)
+                plotDataRef.current = [];
+                setTemp(1.0);     // Low Temp
+                setField(-2.0);   // Start Field
+                setSweepDirection(1);
+                setSweepMode('field');
+                setIsSweeping(true);
+                setIsRunning(true);
+            };
+
+            // 2. High Temp Demo: Sweep H at HIGH T (Updated as requested)
+            const startSecondOrderDemo = () => {
+                // Initialize somewhat random spins for high T, though the temp will randomize them quickly anyway
+                spinsRef.current.fill(Math.random() > 0.5 ? 1 : -1); 
+                plotDataRef.current = [];
+                setTemp(4.0);     // High Temp (Max/Above Tc)
+                setField(-2.0);   // Start Field
+                setSweepDirection(1);
+                setSweepMode('field'); // Reuse field sweep mode
+                setIsSweeping(true);
+                setIsRunning(true);
+            };
+
+            const reset = () => {
+                spinsRef.current.fill(Math.random() > 0.5 ? 1 : -1);
+                setField(0);
+                setTemp(2.27);
+                plotDataRef.current = [];
+                setMagnetization(0);
+                drawCanvas();
+                setIsRunning(false);
+                setIsSweeping(false);
+            };
+
+            // --- SVG Plotter Component ---
+            const Plot = () => {
+                const data = plotDataRef.current;
+                const width = 400;
+                const height = 250;
+                const padding = 30;
+                
+                // M vs H scaling
+                const xScale = (h) => ((h + 2.2) / 4.4) * (width - 2 * padding) + padding;
+                const yScale = (m) => height - (((m + 1.1) / 2.2) * (height - 2 * padding) + padding);
+
+                let pathD = "";
+                if (data.length > 0) {
+                    pathD = `M ${xScale(data[0].h)} ${yScale(data[0].m)} ` + 
+                            data.map(p => `L ${xScale(p.h)} ${yScale(p.m)}`).join(" ");
+                }
+
+                return (
+                    <svg width="100%" viewBox={`0 0 ${width} ${height}`} className="bg-gray-50 border border-gray-200 rounded">
+                        <line x1={padding} y1={yScale(0)} x2={width-padding} y2={yScale(0)} stroke="#ccc" strokeWidth="1" />
+                        <line x1={xScale(0)} y1={padding} x2={xScale(0)} y2={height-padding} stroke="#ccc" strokeWidth="1" />
+                        
+                        <text x={width/2} y={height - 5} textAnchor="middle" fontSize="10" fill="#666">External Field (H)</text>
+                        <text x={10} y={height/2} transform={`rotate(-90, 10, ${height/2})`} textAnchor="middle" fontSize="10" fill="#666">Magnetization (M)</text>
+                        
+                        <text x={xScale(-2)} y={yScale(0) + 12} fontSize="8" textAnchor="middle">-2</text>
+                        <text x={xScale(2)} y={yScale(0) + 12} fontSize="8" textAnchor="middle">2</text>
+                        <text x={xScale(0) - 8} y={yScale(1)} fontSize="8" textAnchor="end">1</text>
+                        <text x={xScale(0) - 8} y={yScale(-1)} fontSize="8" textAnchor="end">-1</text>
+
+                        <path d={pathD} fill="none" stroke="#2563eb" strokeWidth="2" />
+                        <circle cx={xScale(field)} cy={yScale(magnetization)} r="4" fill="#ef4444" />
+                    </svg>
+                );
+            };
+
+            return (
+                <div className="min-h-screen bg-gray-100 p-4 md:p-8 font-sans">
+                    <div className="max-w-6xl mx-auto grid grid-cols-1 lg:grid-cols-2 gap-8">
+                        
+                        {/* Left Column: Visualization */}
+                        <div className="flex flex-col gap-4">
+                            <div className="bg-white p-4 rounded-xl shadow-md">
+                                <h2 className="text-xl font-bold mb-4 text-gray-800">2D Ising Model Simulation</h2>
+                                <div className="aspect-square w-full relative bg-gray-900 rounded-lg overflow-hidden border-4 border-gray-200 group">
+                                    <canvas 
+                                        ref={canvasRef} 
+                                        width={L} 
+                                        height={L} 
+                                        className="w-full h-full"
+                                    />
+                                    {/* ARTISTIC FEATURE: Field Direction Overlay */}
+                                    <div 
+                                        className="absolute inset-0 flex items-center justify-center pointer-events-none transition-opacity duration-200"
+                                        style={{ opacity: Math.abs(field) / 2.5 }}
+                                    >
+                                        <svg 
+                                            viewBox="0 0 24 24" 
+                                            fill="currentColor" 
+                                            className={`w-1/2 h-1/2 text-white/90 drop-shadow-2xl transition-transform duration-300 ${field < 0 ? 'rotate-180' : ''}`}
+                                            style={{ filter: 'drop-shadow(0 0 10px rgba(0,0,0,0.5))' }}
+                                        >
+                                            <path d="M12 2L4 12h5v8h6v-8h5L12 2z" />
+                                        </svg>
+                                    </div>
+                                    <div className="absolute top-2 right-2 bg-black/50 text-white text-xs px-2 py-1 rounded backdrop-blur-sm">
+                                        {sweepMode === 'temp' ? 'Temperature Sweep Active' : (Math.abs(field) > 0.1 ? 'Field Active' : '')}
+                                    </div>
+                                </div>
+                                <div className="flex justify-between items-center mt-4 text-sm font-medium">
+                                    <div className="flex items-center gap-2">
+                                        <span className="w-3 h-3 bg-red-500 rounded-full inline-block"></span> Spin Up (+1)
+                                    </div>
+                                    <div className="flex items-center gap-2">
+                                        <span className="w-3 h-3 bg-blue-500 rounded-full inline-block"></span> Spin Down (-1)
+                                    </div>
+                                </div>
+                            </div>
+
+                            <div className="grid grid-cols-3 gap-4">
+                                <div className="bg-white p-4 rounded-lg shadow-sm text-center">
+                                    <div className="text-xs text-gray-500 uppercase tracking-wider">Magnetization</div>
+                                    <div className="text-xl font-mono font-bold text-gray-800">{magnetization.toFixed(3)}</div>
+                                </div>
+                                <div className="bg-white p-4 rounded-lg shadow-sm text-center">
+                                    <div className="text-xs text-gray-500 uppercase tracking-wider">Field (H)</div>
+                                    <div className="text-xl font-mono font-bold text-gray-800">{field.toFixed(3)}</div>
+                                </div>
+                                <div className="bg-white p-4 rounded-lg shadow-sm text-center">
+                                    <div className="text-xs text-gray-500 uppercase tracking-wider">Temp (T)</div>
+                                    <div className="text-xl font-mono font-bold text-gray-800">{temp.toFixed(2)}</div>
+                                </div>
+                            </div>
+                        </div>
+
+                        {/* Right Column: Controls & Data */}
+                        <div className="flex flex-col gap-4">
+                            <div className="bg-white p-6 rounded-xl shadow-md space-y-6">
+                                <h3 className="font-bold text-gray-700 border-b pb-2">Control Panel</h3>
+                                
+                                <div>
+                                    <div className="flex justify-between mb-1">
+                                        <label className="text-sm font-medium text-gray-700">Temperature (T)</label>
+                                        <span className={`text-sm font-bold ${temp < 2.27 ? 'text-blue-600' : 'text-red-600'}`}>
+                                            {temp < 2.27 ? 'Below Tc (Ferromagnetic)' : 'Above Tc (Paramagnetic)'}
+                                        </span>
+                                    </div>
+                                    <input 
+                                        type="range" 
+                                        min="0.1" 
+                                        max="5.0" 
+                                        step="0.05" 
+                                        value={temp}
+                                        onChange={(e) => {
+                                            setTemp(parseFloat(e.target.value));
+                                            if(sweepMode === 'temp') setSweepMode(null); // Manual override stops sweep
+                                        }}
+                                        className="w-full h-2 bg-gray-200 rounded-lg appearance-none cursor-pointer accent-indigo-600"
+                                    />
+                                </div>
+
+                                <div>
+                                    <div className="flex justify-between mb-1">
+                                        <label className="text-sm font-medium text-gray-700">External Field (H)</label>
+                                    </div>
+                                    <input 
+                                        type="range" 
+                                        min="-2.0" 
+                                        max="2.0" 
+                                        step="0.05" 
+                                        value={field}
+                                        onChange={(e) => {
+                                            setField(parseFloat(e.target.value));
+                                            if (!isRunning) setIsRunning(true);
+                                            if(sweepMode === 'field') setSweepMode(null); // Manual override stops sweep
+                                        }}
+                                        className="w-full h-2 bg-gray-200 rounded-lg appearance-none cursor-pointer accent-indigo-600"
+                                    />
+                                </div>
+
+                                <div className="flex flex-col gap-3 pt-2">
+                                    <div className="grid grid-cols-2 gap-3">
+                                        <button 
+                                            onClick={startFirstOrderDemo}
+                                            disabled={isSweeping}
+                                            className={`py-3 px-2 rounded-lg font-bold text-white text-sm shadow transition-colors
+                                                ${isSweeping ? 'bg-gray-400' : 'bg-indigo-600 hover:bg-indigo-700'}`}
+                                        >
+                                            Demo: 1st Order<br/>
+                                            <span className="text-[10px] font-normal opacity-90">(Low T, Loop H)</span>
+                                        </button>
+                                        
+                                        <button 
+                                            onClick={startSecondOrderDemo}
+                                            disabled={isSweeping}
+                                            className={`py-3 px-2 rounded-lg font-bold text-white text-sm shadow transition-colors
+                                                ${isSweeping ? 'bg-gray-400' : 'bg-teal-600 hover:bg-teal-700'}`}
+                                        >
+                                            Demo: High T<br/>
+                                            <span className="text-[10px] font-normal opacity-90">(Max T, Loop H)</span>
+                                        </button>
+                                    </div>
+
+                                    <div className="flex gap-2">
+                                        <button 
+                                            onClick={() => {
+                                                setIsRunning(!isRunning);
+                                                if(isSweeping) setIsSweeping(false); // Pause stops sweep logic
+                                            }}
+                                            className="flex-1 py-2 px-4 bg-gray-100 hover:bg-gray-200 text-gray-800 font-semibold rounded-lg border border-gray-300"
+                                        >
+                                            {isRunning ? "Pause" : "Resume"}
+                                        </button>
+                                        <button 
+                                            onClick={reset}
+                                            className="flex-1 py-2 px-4 bg-gray-100 hover:bg-gray-200 text-gray-800 font-semibold rounded-lg border border-gray-300"
+                                        >
+                                            Reset
+                                        </button>
+                                    </div>
+                                </div>
+                            </div>
+
+                            <div className="bg-white p-6 rounded-xl shadow-md flex-grow flex flex-col">
+                                <h3 className="font-bold text-gray-700 mb-4">Phase Transition Diagram (M vs H)</h3>
+                                <div className="flex-grow min-h-[200px]">
+                                    <Plot />
+                                </div>
+                                <div className="mt-4 text-sm text-gray-600 bg-blue-50 p-3 rounded border border-blue-100">
+                                    <strong>Observation Guide:</strong>
+                                    <ul className="list-disc list-inside mt-1 space-y-1">
+                                        <li><strong>1st Order (Low T):</strong> Watch the "Jump" in Magnetization (hysteresis loop).</li>
+                                        <li><strong>High T (Max T):</strong> Watch the smooth "S-curve" with no jumps.</li>
+                                    </ul>
+                                </div>
+                            </div>
+
+                        </div>
+                    </div>
+                </div>
+            );
+        }
+
+        const root = ReactDOM.createRoot(document.getElementById('root'));
+        root.render(<App />);
+    </script>
+</body>
+</html>
